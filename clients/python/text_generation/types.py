@@ -423,6 +423,9 @@ class Details(BaseModel):
     top_tokens: Optional[List[List[Token]]] = None
     # Additional sequences when using the `best_of` parameter
     best_of_sequences: Optional[List[BestOfSequence]] = None
+    # Energy consumption metrics
+    cpu_energy_joules: Optional[float] = None
+    gpu_energy_joules: Optional[float] = None
 
 
 # `generate` return value
@@ -441,6 +444,9 @@ class StreamDetails(BaseModel):
     generated_tokens: int
     # Sampling seed if sampling was activated
     seed: Optional[int] = None
+    # Energy consumption metrics
+    cpu_energy_joules: Optional[float] = None
+    gpu_energy_joules: Optional[float] = None
 
 
 # `generate_stream` return value

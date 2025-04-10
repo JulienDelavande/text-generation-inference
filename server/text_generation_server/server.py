@@ -16,6 +16,7 @@ from text_generation_server.interceptor import ExceptionInterceptor
 from text_generation_server.models import Model, get_model_with_lora_adapters
 from text_generation_server.utils.adapter import AdapterInfo
 from text_generation_server.utils.prefill_chunking import set_max_prefill_tokens
+from text_generation_server.utils.energy import EnergyMonitor
 
 try:
     from text_generation_server.models.pali_gemma import PaliGemmaBatch
@@ -67,6 +68,8 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
         # Quantize is resolved during model loading
         self.quantize = model.quantize
         self.server_urls = server_urls
+        self.energy_monitor = EnergyMonitor()
+        self.energy_monitor.initialize()
         # For some reason, inference_mode does not work well with GLOO which we use on CPU
         # if model.device.type == "cuda":
         #     # Force inference mode for the lifetime of TextGenerationService
@@ -152,6 +155,7 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
 
     async def Prefill(self, request, context):
         start = time.time_ns()
+        self.energy_monitor.start_measurement()
         if (
             self.model.batch_type in VLM_BATCH_TYPES
         ):  # Hack, i would rather use kwargs in the `from_pb` call
@@ -182,6 +186,7 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
 
         generations, next_batch, timings = self.model.generate_token(batch)
         self.cache.set(next_batch)
+        cpu_energy, gpu_energy = self.energy_monitor.get_measurement()
 
         return generate_pb2.PrefillResponse(
             generations=[generation.to_pb() for generation in generations],
@@ -190,10 +195,13 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
             decode_ns=timings[1],
             total_ns=time.time_ns() - start,
             concat_ns=concat_ns,
+            cpu_energy_joules=cpu_energy if cpu_energy is not None else 0.0,
+            gpu_energy_joules=gpu_energy if gpu_energy is not None else 0.0,
         )
 
     async def Decode(self, request, context):
         start = time.time_ns()
+        self.energy_monitor.start_measurement()
         if len(request.batches) == 0:
             raise ValueError("Must provide at least one batch")
 
@@ -217,6 +225,7 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
 
         generations, next_batch, timings = self.model.generate_token(batch)
         self.cache.set(next_batch)
+        cpu_energy, gpu_energy = self.energy_monitor.get_measurement()
 
         return generate_pb2.DecodeResponse(
             generations=[generation.to_pb() for generation in generations],
@@ -225,6 +234,8 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
             forward_ns=timings[0],
             decode_ns=timings[1],
             total_ns=time.time_ns() - start,
+            cpu_energy_joules=cpu_energy if cpu_energy is not None else 0.0,
+            gpu_energy_joules=gpu_energy if gpu_energy is not None else 0.0,
         )
 
 
