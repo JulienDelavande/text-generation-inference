@@ -156,7 +156,13 @@ responses((status = 200, description = "Served model info", body = Info))
 )]
 #[instrument]
 async fn get_model_info(info: Extension<Info>) -> Json<Info> {
-    Json(info.0)
+    println!("GET /info called !");
+    tracing::info!("Custom /info endpoint hit!");
+
+    // Exemple : cloner et modifier légèrement la réponse
+    let mut model_info = info.0.clone();
+    model_info.model_id = format!("{} + TEST", model_info.model_id);
+    Json(model_info)
 }
 
 #[utoipa::path(
@@ -287,6 +293,8 @@ pub(crate) async fn generate_internal(
     let start_time = Instant::now();
     metrics::counter!("tgi_request_count").increment(1);
 
+    println!("Input: {}", req.inputs);
+
     // Do not long ultra long inputs, like image payloads.
     tracing::debug!(
         "Input: {}",
@@ -307,7 +315,7 @@ pub(crate) async fn generate_internal(
             let (response, best_of_responses) = infer.generate_best_of(req, best_of).await?;
             (response, Some(best_of_responses))
         }
-        _ => (infer.generate(req).await?, None),
+         _ => (infer.generate(req).await?, None),
     };
 
     // Token details

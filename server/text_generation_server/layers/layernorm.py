@@ -34,7 +34,12 @@ torch.nn.LayerNorm.load = load_layer_norm
 torch.nn.LayerNorm.load_no_bias = load_layer_norm_no_bias
 
 if SYSTEM == "cuda":
-    import dropout_layer_norm
+    #import dropout_layer_norm
+
+    try:
+        import dropout_layer_norm
+    except ImportError:
+        dropout_layer_norm = None
 
     class FastLayerNorm(nn.LayerNorm):
         def forward(self, hidden_states, residual=None):

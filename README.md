@@ -212,7 +212,16 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 #using conda
 conda create -n text-generation-inference python=3.11
+eval "$($HOME/miniconda/bin/conda shell.bash hook)"
 conda activate text-generation-inference
+conda install -c conda-forge pkg-config openssl
+export OPENSSL_DIR=$CONDA_PREFIX && \
+export OPENSSL_INCLUDE_DIR=$CONDA_PREFIX/include && \
+export OPENSSL_LIB_DIR=$CONDA_PREFIX/lib && \
+export PKG_CONFIG_PATH=$CONDA_PREFIX/lib/pkgconfig
+export PYTHONPATH=/home/user/miniconda/envs/text-generation-inference/lib/python3.11/site-packages
+
+
 
 #using python venv
 python3 -m venv .venv
@@ -240,8 +249,11 @@ brew install protobuf
 Then run:
 
 ```shell
-BUILD_EXTENSIONS=True make install # Install repository and HF/transformer fork with CUDA kernels
+BUILD_EXTENSIONS=True make install
+pkill -f text-generation
+text-generation-launcher --model-id HuggingFaceH4/zephyr-7b-beta --disable-custom-kernels
 text-generation-launcher --model-id mistralai/Mistral-7B-Instruct-v0.2
+pkill -f text-generation-launcher
 ```
 
 **Note:** on some machines, you may also need the OpenSSL libraries and gcc. On Linux machines, run:
@@ -289,7 +301,7 @@ touch text_generation_server/pb/__init__.py
 All development dependencies (cargo, Python, Torch), etc. are available in this
 dev shell.
 
-## Optimized architectures
+## Optimized architectures  
 
 TGI works out of the box to serve optimized models for all modern models. They can be found in [this list](https://huggingface.co/docs/text-generation-inference/supported_models).
 

@@ -36,7 +36,12 @@ install-server: gen-server
 install: install-cuda
 	echo "Installed server"
 
-install-cuda: install-server install-flash-attention-v2-cuda install-flash-attention
+# install-cuda: install-server install-flash-attention-v2-cuda install-flash-attention
+# 	uv pip install -e ".[attention,bnb,marlin,moe]"
+# 	uv pip install nvidia-nccl-cu12==2.22.3
+# 	kernels download .
+
+install-cuda: install-server
 	uv pip install -e ".[attention,bnb,marlin,moe]"
 	uv pip install nvidia-nccl-cu12==2.22.3
 	kernels download .
