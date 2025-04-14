@@ -169,6 +169,7 @@ To allow the container to use 1G of Shared Memory and support SHM sharing, we ad
 If you are running `text-generation-inference` inside `Kubernetes`. You can also add Shared Memory to the container by
 creating a volume with:
 
+
 ```yaml
 - name: shm
   emptyDir:
