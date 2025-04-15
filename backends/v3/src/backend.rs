@@ -492,6 +492,7 @@ fn send_responses(
             text,
             logprob,
             special,
+            energy_consumption: None,
         };
         let top_tokens = if let Some(top_tokens_) = generation.top_tokens.get(i) {
             top_tokens_
@@ -505,6 +506,7 @@ fn send_responses(
                     text: text.to_string(),
                     logprob,
                     special,
+                    energy_consumption: None,
                 })
                 .collect()
         } else {
@@ -521,13 +523,14 @@ fn send_responses(
                     generated_text: GeneratedText::from(generated_text.clone()),
                     queued: entry.queue_time,
                     start: entry.batch_time.unwrap(),
+                    energy_consumption: None,
                 }))?;
             }
             _ => {
                 // Send message
                 entry
                     .response_tx
-                    .send(Ok(InferStreamResponse::Intermediate { token, top_tokens }))?;
+                    .send(Ok(InferStreamResponse::Intermediate { token, top_tokens, energy_consumption: None }))?;
             }
         }
     }

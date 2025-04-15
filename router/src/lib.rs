@@ -204,7 +204,7 @@ pub struct Gemma3Processor {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Llama4Processor {
     #[serde(default)]
-    do_image_splitting: bool,
+    max_patches: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -916,6 +916,11 @@ pub(crate) struct ChatRequest {
     #[serde(default)]
     #[schema(nullable = true, example = "null")]
     pub stream_options: StreamOptions,
+
+    /// Energy consumption for the request.
+    #[serde(default)]
+    #[schema(nullable = true, example = "null")]
+    pub energy_consumption: Option<u64>,
 }
 
 impl ChatRequest {
@@ -1373,6 +1378,8 @@ pub struct Token {
     pub logprob: f32,
     #[schema(example = "false")]
     pub special: bool,
+    #[schema(nullable = true, example = 1000000)]
+    pub energy_consumption: Option<u64>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1457,6 +1464,8 @@ pub(crate) struct GenerateResponse {
     pub generated_text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<Details>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub energy_consumption: Option<u64>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -1491,6 +1500,8 @@ pub(crate) struct StreamResponse {
     pub generated_text: Option<String>,
     #[schema(nullable = true, default = "null")]
     pub details: Option<StreamDetails>,
+    #[schema(nullable = true, default = "null")]
+    pub energy_consumption: Option<u64>,
 }
 
 #[derive(Serialize, ToSchema)]

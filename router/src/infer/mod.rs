@@ -24,6 +24,7 @@ use tokio::time::Instant;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::StreamExt;
 use tracing::instrument;
+use nvml_wrapper::Nvml;
 
 #[async_trait]
 pub trait Backend {
@@ -57,6 +58,8 @@ pub struct Infer {
     limit_concurrent_requests: Arc<Semaphore>,
     /// Backend health
     backend_health: Arc<AtomicBool>,
+    /// NVML instance
+    nvml: Arc<Nvml>,
 }
 
 impl Infer {
@@ -86,12 +89,16 @@ impl Infer {
         // Backend health
         let backend_health = Arc::new(AtomicBool::new(backend.start_health()));
 
+        // Initialize NVML
+        let nvml = Nvml::init().expect("Failed to initialize NVML");
+
         Self {
             validation,
             backend: Arc::new(backend),
             chat_template,
             limit_concurrent_requests: semaphore,
             backend_health,
+            nvml: Arc::new(nvml),
         }
     }
 
@@ -108,6 +115,11 @@ impl Infer {
         ),
         InferError,
     > {
+        // Get device and initial energy consumption
+        let device = self.nvml.device_by_index(0).map_err(|e| InferError::EnergyConsumptionError(e.to_string()))?;
+        let energy_start = device.total_energy_consumption().map_err(|e| InferError::EnergyConsumptionError(e.to_string()))?;
+        println!("energy_start: {:?}", energy_start);
+
         // Limit concurrent requests by acquiring a permit from the semaphore
         let permit = self
             .clone()
@@ -131,6 +143,7 @@ impl Infer {
         local_request.parameters.seed = Some(seed);
         let input_length = valid_request.input_length;
         let max_total_new_tokens = valid_request.stopping_parameters.max_total_new_tokens;
+
         let mut generation_stream = self.backend.schedule(valid_request)?;
 
         // Wrap generation stream to update the backend health if the stream contains an error
@@ -139,7 +152,8 @@ impl Infer {
             let mut first_start = None;
             let mut first_queued = None;
             let mut all_generated_text: Option<GeneratedText> = None;
-
+            let mut energy_consumption_results: Option<u64> = None;
+            let mut energy_last: Option<u64> = Some(energy_start);
             while let Some(response) = generation_stream.next().await {
                 let response = response.inspect_err(|_err| {
                     self.backend_health.store(false, Ordering::SeqCst);
@@ -147,18 +161,32 @@ impl Infer {
 
                 match response {
                     InferStreamResponse::Prefill(_) => yield Ok(response),
-                    InferStreamResponse::Intermediate { .. } => {
+                    InferStreamResponse::Intermediate { token, top_tokens, energy_consumption } => {
                         total_generated_tokens += 1;
-                        yield Ok(response);
+                        // Get current energy consumption
+                        let current_energy = device.total_energy_consumption()
+                            .map_err(|e| InferError::EnergyConsumptionError(e.to_string()))?;
+
+                        let token_energy = current_energy - energy_last.unwrap();
+                        energy_last = Some(current_energy);
+                        energy_consumption_results = Some(current_energy - energy_start);
+                        println!("total_generated_tokens: {:?}", total_generated_tokens);
+                        println!("token_energy: {:?}", token_energy);
+                        println!("energy_consumption_results: {:?}", energy_consumption_results);
+                        yield Ok(InferStreamResponse::Intermediate { 
+                            token, 
+                            top_tokens,
+                            energy_consumption: energy_consumption_results,
+                        });
                     }
-                    InferStreamResponse::End { token, top_tokens,generated_text, start, queued  } => {
+                    InferStreamResponse::End { token, top_tokens,generated_text, start, queued, energy_consumption } => {
                         total_generated_tokens += 1;
                         first_start = first_start.or(Some(start));
                         first_queued = first_queued.or(Some(queued));
                         if let Some(v) = all_generated_text.as_mut() {
-                                v.text.push_str(&generated_text.text);
-                                v.generated_tokens = total_generated_tokens;
-                                v.finish_reason = generated_text.finish_reason.clone();
+                            v.text.push_str(&generated_text.text);
+                            v.generated_tokens = total_generated_tokens;
+                            v.finish_reason = generated_text.finish_reason.clone();
                         };
 
                         if matches!(generated_text.finish_reason, FinishReason::Length) && total_generated_tokens < max_total_new_tokens {
@@ -169,7 +197,11 @@ impl Infer {
                                 Ok(valid_request) => valid_request,
                                 Err(err) => {
                                     tracing::debug!("Failed to continue request: {err}");
-                                    yield Ok(InferStreamResponse::End {token, top_tokens, generated_text: all_generated_text.unwrap(), start: first_start.unwrap(), queued: first_queued.unwrap() });
+                                    let energy_end = device.total_energy_consumption()
+                                        .map_err(|e| InferError::GenerationError(e.to_string()))?;
+                                    energy_consumption_results = Some(energy_end - energy_start);
+                                    println!("energy_consumption_results: {:?}", energy_consumption_results);
+                                    yield Ok(InferStreamResponse::End {token, top_tokens, generated_text: all_generated_text.unwrap(), start: first_start.unwrap(), queued: first_queued.unwrap(), energy_consumption: energy_consumption_results });
                                     break;
                                 }
                             };
@@ -177,17 +209,34 @@ impl Infer {
                             generation_stream = match self.backend.schedule(valid_request) {
                                 Ok(stream) => {
                                     tracing::debug!("Continue request");
-                                    yield Ok(InferStreamResponse::Intermediate { token, top_tokens } );
+                                    println!("HERE: {:?}", energy_consumption);
+                                    yield Ok(InferStreamResponse::Intermediate { token, top_tokens, energy_consumption,} );
                                     stream
                                 },
                                 Err(err) => {
                                     tracing::debug!("Failed to continue request: {err}");
-                                    yield Ok(InferStreamResponse::End {token, top_tokens, generated_text: all_generated_text.unwrap(), start: first_start.unwrap(), queued: first_queued.unwrap() });
+                                    let energy_end = device.total_energy_consumption()
+                                        .map_err(|e| InferError::GenerationError(e.to_string()))?;
+                                    energy_consumption_results = Some(energy_end - energy_start);
+                                    println!("energy_consumption_results: {:?}", energy_consumption_results);
+                                    yield Ok(InferStreamResponse::End {token, top_tokens, generated_text: all_generated_text.unwrap(), start: first_start.unwrap(), queued: first_queued.unwrap(), energy_consumption: energy_consumption_results });
                                     break;
                                 }
                             }
                         } else {
-                            yield Ok(InferStreamResponse::End {token, top_tokens, generated_text: all_generated_text.unwrap_or(generated_text), start: first_start.unwrap(), queued: first_queued.unwrap() });
+                            // Get final energy consumption
+                            let energy_end = device.total_energy_consumption()
+                                .map_err(|e| InferError::GenerationError(e.to_string()))?;
+                            energy_consumption_results = Some(energy_end - energy_start);
+                            println!("energy_consumption_results: {:?}", energy_consumption_results);
+                            yield Ok(InferStreamResponse::End {
+                                token,
+                                top_tokens,
+                                generated_text: all_generated_text.unwrap_or(generated_text),
+                                start: first_start.unwrap(),
+                                queued: first_queued.unwrap(),
+                                energy_consumption: energy_consumption_results,
+                            });
                             break;
                         }
 
@@ -246,6 +295,10 @@ impl Infer {
         &self,
         request: GenerateRequest,
     ) -> Result<InferResponse, InferError> {
+        // Get device and initial energy consumption
+        let device = self.nvml.device_by_index(0).map_err(|e| InferError::EnergyConsumptionError(e.to_string()))?;
+        let energy_start = device.total_energy_consumption().map_err(|e| InferError::EnergyConsumptionError(e.to_string()))?;
+        println!("energy_start: {:?}", energy_start);
         let use_top_tokens = request.parameters.top_n_tokens.is_some_and(|x| x > 0);
 
         // Create stream and keep semaphore permit as long as generate lives
@@ -258,6 +311,8 @@ impl Infer {
         let mut result_generated_text = None;
         let mut result_start = None;
         let mut result_queued = None;
+        let mut result_energy_consumption = None;
+        let mut result_token_energy_consumptions = Vec::new();
 
         let mut stream = Box::pin(stream);
 
@@ -269,9 +324,12 @@ impl Infer {
                     result_prefill = prefill_tokens;
                 }
                 // Push last token
-                InferStreamResponse::Intermediate { token, top_tokens } => {
+                InferStreamResponse::Intermediate { token, top_tokens, energy_consumption } => {
+                    let mut token = token;
+                    token.energy_consumption = energy_consumption;
                     result_tokens.push(token);
                     result_top_tokens.push(top_tokens);
+                    result_token_energy_consumptions.push(energy_consumption);
                 }
                 // Final message
                 // Set return values
@@ -281,12 +339,18 @@ impl Infer {
                     start,
                     queued,
                     top_tokens,
+                    energy_consumption,
                 } => {
                     result_tokens.push(token);
                     result_top_tokens.push(top_tokens);
                     result_generated_text = Some(generated_text);
                     result_start = Some(start);
-                    result_queued = Some(queued)
+                    result_queued = Some(queued);
+                    let energy_end = device.total_energy_consumption()
+                        .map_err(|e| InferError::GenerationError(e.to_string()))?;
+                    println!("energy_end: {:?}", energy_end);
+                    result_energy_consumption = Some(energy_end - energy_start);
+                    result_token_energy_consumptions.push(energy_consumption);
                 }
             }
         }
@@ -307,6 +371,8 @@ impl Infer {
                 } else {
                     Vec::new()
                 },
+                energy_consumption: result_energy_consumption,
+                token_energy_consumptions: result_token_energy_consumptions,
             })
         } else {
             let err = InferError::IncompleteGeneration;
@@ -380,6 +446,7 @@ pub enum InferStreamResponse {
     Intermediate {
         token: Token,
         top_tokens: Vec<Token>,
+        energy_consumption: Option<u64>,
     },
     // Last message
     End {
@@ -388,6 +455,7 @@ pub enum InferStreamResponse {
         generated_text: GeneratedText,
         start: Instant,
         queued: Instant,
+        energy_consumption: Option<u64>,
     },
 }
 
@@ -403,6 +471,8 @@ pub(crate) struct InferResponse {
     pub(crate) queued: Instant,
     pub(crate) start: Instant,
     pub(crate) top_tokens: Vec<Vec<Token>>,
+    pub(crate) energy_consumption: Option<u64>,
+    pub(crate) token_energy_consumptions: Vec<Option<u64>>,
 }
 
 #[derive(Debug, Error)]
@@ -425,6 +495,8 @@ pub enum InferError {
     ToolError(String),
     #[error("Stream event serialization error")]
     StreamSerializationError(String),
+    #[error("Energy consumption error: {0}")]
+    EnergyConsumptionError(String),
 }
 
 impl InferError {
@@ -439,6 +511,7 @@ impl InferError {
             InferError::MissingTemplateVariable(_) => "missing_template_variable",
             InferError::ToolError(_) => "tool_error",
             InferError::StreamSerializationError(_) => "stream_serialization_error",
+            InferError::EnergyConsumptionError(_) => "energy_consumption_error",
         }
     }
 

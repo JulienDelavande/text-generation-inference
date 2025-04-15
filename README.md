@@ -223,7 +223,6 @@ export PKG_CONFIG_PATH=$CONDA_PREFIX/lib/pkgconfig
 export PYTHONPATH=/home/user/miniconda/envs/text-generation-inference/lib/python3.11/site-packages
 
 
-
 #using python venv
 python3 -m venv .venv
 source .venv/bin/activate

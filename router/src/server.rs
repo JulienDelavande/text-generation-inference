@@ -1,3 +1,4 @@
+
 use crate::chat::{ChatChoice, ChatEvent, ChatState};
 /// HTTP Server logic
 use crate::config::Config;
@@ -74,11 +75,8 @@ fn encoding_to_tokens(encoding: &tokenizers::Encoding, input: &str) -> Vec<Simpl
             .iter()
             .zip(offsets)
             .map(|(&id, &(start, stop))| {
-                let text = input
-                    .chars()
-                    .skip(start)
-                    .take(stop - start)
-                    .collect::<String>();
+                let text: Vec<u8> = input.bytes().skip(start).take(stop - start).collect();
+                let text: String = String::from_utf8_lossy(&text).to_string();
                 SimpleToken {
                     id,
                     text,
@@ -156,13 +154,7 @@ responses((status = 200, description = "Served model info", body = Info))
 )]
 #[instrument]
 async fn get_model_info(info: Extension<Info>) -> Json<Info> {
-    println!("GET /info called !");
-    tracing::info!("Custom /info endpoint hit!");
-
-    // Exemple : cloner et modifier légèrement la réponse
-    let mut model_info = info.0.clone();
-    model_info.model_id = format!("{} + TEST", model_info.model_id);
-    Json(model_info)
+    Json(info.0)
 }
 
 #[utoipa::path(
@@ -293,8 +285,6 @@ pub(crate) async fn generate_internal(
     let start_time = Instant::now();
     metrics::counter!("tgi_request_count").increment(1);
 
-    println!("Input: {}", req.inputs);
-
     // Do not long ultra long inputs, like image payloads.
     tracing::debug!(
         "Input: {}",
@@ -315,7 +305,7 @@ pub(crate) async fn generate_internal(
             let (response, best_of_responses) = infer.generate_best_of(req, best_of).await?;
             (response, Some(best_of_responses))
         }
-         _ => (infer.generate(req).await?, None),
+        _ => (infer.generate(req).await?, None),
     };
 
     // Token details
@@ -365,6 +355,7 @@ pub(crate) async fn generate_internal(
     let queue_time = response.start - response.queued;
     let inference_time = Instant::now() - response.start;
     let time_per_token = inference_time / response.generated_text.generated_tokens;
+    let energy_consumption = response.energy_consumption;
 
     // Tracing metadata
     span.record("total_time", format!("{total_time:?}"));
@@ -410,6 +401,12 @@ pub(crate) async fn generate_internal(
         "x-generated-tokens",
         response.generated_text.generated_tokens.into(),
     );
+    if let Some(energy_consumption) = response.energy_consumption {
+        headers.insert(
+            "x-energy-consumption",
+            energy_consumption.to_string().parse().unwrap(),
+        );
+    }
 
     // Metrics
     metrics::counter!("tgi_request_success").increment(1);
@@ -434,6 +431,7 @@ pub(crate) async fn generate_internal(
     let response = GenerateResponse {
         generated_text: output_text,
         details,
+        energy_consumption,
     };
     Ok((headers, input_length, Json(response)))
 }
@@ -564,6 +562,7 @@ async fn generate_stream_internal(
                                     InferStreamResponse::Intermediate{
                                         token,
                                         top_tokens,
+                                        energy_consumption,
                                     } => {
                                         tracing::debug!(parent: &span, "Token: {:?}", token);
 
@@ -574,6 +573,7 @@ async fn generate_stream_internal(
                                             top_tokens,
                                             generated_text: None,
                                             details: None,
+                                            energy_consumption: None,
                                         };
                                         yield Ok(stream_token);
                                     }
@@ -584,6 +584,7 @@ async fn generate_stream_internal(
                                         start,
                                         queued,
                                         top_tokens,
+                                        energy_consumption,
                                     } => {
                                         // Token details
                                         let details = match details {
@@ -602,6 +603,14 @@ async fn generate_stream_internal(
                                         let queue_time = start - queued;
                                         let inference_time = Instant::now() - start;
                                         let time_per_token = inference_time / generated_text.generated_tokens;
+
+                                        // Add energy consumption to headers
+                                        // if let Some(energy_consumption) = energy_consumption {
+                                        //     headers.insert(
+                                        //         "x-energy-consumption",
+                                        //         energy_consumption.to_string().parse().unwrap(),
+                                        //     );
+                                        // }
 
                                         // Tracing metadata
                                         span.record("total_time", format!("{total_time:?}"));
@@ -636,7 +645,8 @@ async fn generate_stream_internal(
                                             token,
                                             top_tokens,
                                             generated_text: Some(output_text),
-                                            details
+                                            details,
+                                            energy_consumption,
                                         };
 
                                         yield Ok(stream_token);
@@ -2385,6 +2395,7 @@ impl From<InferError> for (StatusCode, Json<ErrorResponse>) {
             InferError::MissingTemplateVariable(_) => StatusCode::UNPROCESSABLE_ENTITY,
             InferError::ToolError(_) => StatusCode::UNPROCESSABLE_ENTITY,
             InferError::StreamSerializationError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            InferError::EnergyConsumptionError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
         (
